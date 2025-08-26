@@ -1,15 +1,19 @@
 {
   "expo": {
-    "name": "my-expo-app",
+    "name": "vts",
     "slug": "my-expo-app",
     "version": "1.0.0",
 
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "https://img.icons8.com/ios-filled/100/musical-notes.png"
     },
 
     "experiments": {
       "tsconfigPaths": true
+    },
+
+    "extra": {
+      "JAMENDO_CLIENT_ID": ""
     },
 
     "plugins": [],
@@ -30,7 +34,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/icons/logo.png",
         "backgroundColor": "#ffffff"
       }
     }
