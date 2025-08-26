@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Image, Modal, Pressable, Text, TouchableOpacity, View, FlatList } from 'react-native';
 import { useNavigation, useNavigationState } from '@react-navigation/native';
 import { getControls, subscribe } from '@/services/playerController';
@@ -24,6 +24,9 @@ export default function GlobalMiniPlayer() {
   const [queue, setQueue] = useState<any[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(-1);
   const [showQueue, setShowQueue] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [dragPos, setDragPos] = useState<number | null>(null);
+  const barWidthRef = useRef(0);
 
   useEffect(() => {
     const unsub = subscribe((s) => {
@@ -40,7 +43,15 @@ export default function GlobalMiniPlayer() {
   // Hide on NowPlaying screen to prevent visual overlap with full-screen player
   if (!track || currentRouteName === 'NowPlaying') return null;
 
-  const progress = duration > 0 ? Math.min(1, position / duration) : 0;
+  const effectivePos = dragging && dragPos != null ? dragPos : position;
+  const progress = duration > 0 ? Math.min(1, Math.max(0, effectivePos / duration)) : 0;
+
+  const updateDragFromX = (x: number) => {
+    const w = barWidthRef.current || 1;
+    const ratio = Math.min(1, Math.max(0, x / w));
+    const millis = Math.floor(ratio * (duration || 0));
+    setDragPos(millis);
+  };
   // Keep mini-player above the tab bar (configured at 60 height) and safe area
   const TAB_BAR_HEIGHT = 60;
   const bottomOffset = insets.bottom + TAB_BAR_HEIGHT + 8;
@@ -104,9 +115,36 @@ export default function GlobalMiniPlayer() {
           </View>
         </View>
 
-        {/* Thin progress bar */}
+        {/* Thin progress bar with drag-to-seek */}
         <View className="mt-3">
-          <View className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(148,163,184,0.2)' }}>
+          <View
+            className="h-1.5 rounded-full overflow-hidden"
+            style={{ backgroundColor: 'rgba(148,163,184,0.2)' }}
+            onLayout={(e) => {
+              barWidthRef.current = e.nativeEvent.layout.width;
+            }}
+            onStartShouldSetResponder={() => true}
+            onMoveShouldSetResponder={() => true}
+            onResponderGrant={(e) => {
+              setDragging(true);
+              updateDragFromX(e.nativeEvent.locationX);
+            }}
+            onResponderMove={(e) => {
+              updateDragFromX(e.nativeEvent.locationX);
+            }}
+            onResponderRelease={() => {
+              setDragging(false);
+              if (dragPos != null) {
+                getControls().seekTo(dragPos);
+              }
+              setDragPos(null);
+            }}
+            onResponderTerminationRequest={() => true}
+            onResponderTerminate={() => {
+              setDragging(false);
+              setDragPos(null);
+            }}
+          >
             <View style={{ width: `${progress * 100}%`, backgroundColor: '#22d3ee' }} className="h-full" />
           </View>
         </View>
