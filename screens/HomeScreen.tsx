@@ -160,12 +160,6 @@ export default function HomeScreen() {
                   <Text className="text-cyan-200/80">Coming soon</Text>
                 </View>
               </View>
-              <View
-                className="rounded-2xl p-4"
-                style={{ backgroundColor: 'rgba(2,6,23,0.75)', borderWidth: 1, borderColor: 'rgba(34,211,238,0.2)' }}
-              >
-                <Text className="text-cyan-200/80">Coming soon</Text>
-              </View>
             </View>
           )}
           contentContainerStyle={{ paddingBottom: 24 }}

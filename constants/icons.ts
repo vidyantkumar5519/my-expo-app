@@ -11,4 +11,11 @@ export const icons = {
   next: { uri: 'https://img.icons8.com/ios-filled/100/end--v1.png' },
   prev: { uri: 'https://img.icons8.com/ios-filled/100/skip-to-start.png' },
   arrow: { uri: 'https://img.icons8.com/ios-filled/100/chevron-right.png' },
+  close: { uri: 'https://img.icons8.com/ios-filled/100/delete-sign.png' },
+  more: { uri: 'https://img.icons8.com/ios-glyphs/90/more.png' },
+  shuffle: { uri: 'https://img.icons8.com/ios-filled/100/shuffle.png' },
+  repeat: { uri: 'https://img.icons8.com/ios-filled/100/repeat.png' },
+  repeatOne: { uri: 'https://img.icons8.com/ios-filled/100/repeat-one.png' },
+  share: { uri: 'https://img.icons8.com/ios-filled/100/share-2.png' },
+  download: { uri: 'https://img.icons8.com/ios-filled/100/download--v1.png' },
 };

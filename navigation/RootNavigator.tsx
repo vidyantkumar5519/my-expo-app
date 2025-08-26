@@ -8,6 +8,7 @@ import LibraryScreen from '@/screens/LibraryScreen';
 import { Image, Text } from 'react-native';
 import { icons } from '@/constants/icons';
 import NowPlayingScreen from '@/screens/NowPlayingScreen';
+import GlobalMiniPlayer from '@/components/GlobalMiniPlayer';
 
 export type RootTabParamList = {
   Home: undefined;
@@ -25,7 +26,9 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function Tabs() {
   return (
-    <Tab.Navigator
+    <>
+      <Tab.Navigator
+      lazy={false}
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarShowLabel: false,
@@ -39,17 +42,22 @@ function Tabs() {
         },
         tabBarStyle: { height: 60, paddingBottom: 10 },
       })}
-    >
-      <Tab.Screen name="Home" component={HomeScreen} />
-      <Tab.Screen name="Search" component={SearchScreen} />
-      <Tab.Screen name="Library" component={LibraryScreen} />
-    </Tab.Navigator>
+      >
+        <Tab.Screen name="Home" component={HomeScreen} />
+        <Tab.Screen name="Search" component={SearchScreen} />
+        <Tab.Screen name="Library" component={LibraryScreen} />
+      </Tab.Navigator>
+
+      {/* Global floating mini-player overlay within Tabs context */}
+      <GlobalMiniPlayer />
+    </>
   );
 }
 
 export default function RootNavigator() {
   return (
     <NavigationContainer>
+      {/* Stack screens */}
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Tabs" component={Tabs} />
         <Stack.Screen name="NowPlaying" component={NowPlayingScreen} />

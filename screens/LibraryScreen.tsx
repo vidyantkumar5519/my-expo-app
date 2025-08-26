@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, ImageBackground, Image, ScrollView, TouchableOpacity, TextInput, FlatList } from 'react-native';
+import { View, Text, ImageBackground, Image, TouchableOpacity, TextInput, FlatList } from 'react-native';
 import { images } from '@/constants/images';
 import { icons } from '@/constants/icons';
 import { getFavorites, type Playlist, getPlaylists, createPlaylist } from '@/services/storage';
@@ -40,7 +40,12 @@ export default function LibraryScreen() {
           <View className="h-8 w-8 rounded-full border border-cyan-400/40" style={{shadowColor:'#22d3ee',shadowOpacity:0.45,shadowRadius:10}} />
         </View>
 
-        <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <FlatList
+          data={[]}
+          keyExtractor={() => 'header'}
+          renderItem={() => null}
+          ListHeaderComponent={(
+          <View>
           <View className="px-6 mt-2">
             <Text
               className="text-lg font-semibold mb-3 text-white"
@@ -57,7 +62,10 @@ export default function LibraryScreen() {
               ) : (
                 <FlatList
                   data={favorites}
-                  keyExtractor={(item) => String(item.trackId)}
+                  keyExtractor={(item, index) => {
+                    const base = item?.trackId ?? item?.collectionId ?? item?.previewUrl ?? item?.artworkUrl100 ?? `${item?.trackName}-${item?.artistName}`;
+                    return `fav-${String(base)}-${index}`;
+                  }}
                   renderItem={({ item }) => (
                     <View className="flex-row items-center p-2 gap-3 rounded-xl mb-2" style={{backgroundColor:'rgba(2,6,23,0.5)', borderWidth:1, borderColor:'rgba(34,211,238,0.15)'}}>
                       {item.artworkUrl100 ? (
@@ -75,7 +83,6 @@ export default function LibraryScreen() {
               )}
             </View>
           </View>
-
           <View className="px-6 mt-8">
             <Text
               className="text-lg font-semibold mb-3 text-white"
@@ -118,7 +125,11 @@ export default function LibraryScreen() {
               )}
             </View>
           </View>
-        </ScrollView>
+          </View>
+          )}
+          contentContainerStyle={{ paddingBottom: 24 }}
+          showsVerticalScrollIndicator={false}
+        />
       </View>
     </ImageBackground>
   );

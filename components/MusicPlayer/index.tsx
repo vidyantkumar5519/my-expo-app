@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { searchTracks, ITunesTrack } from '@/services/itunes';
 import { images } from '@/constants/images';
 import { icons } from '@/constants/icons';
+import { registerControls, setPlayerState, PlayerControls } from '@/services/playerController';
 import Constants from 'expo-constants';
 import {
   jamendoFeatured,
@@ -52,13 +53,55 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
 
   const [current, setCurrent] = useState<ITunesTrack | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
+  // Token to ensure only the latest loadAndPlay operation is active
+  const loadSeqRef = useRef(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [currentIndex, setCurrentIndex] = useState<number | null>(null);
-  const [barWidth, setBarWidth] = useState(0);
   const [isFav, setIsFav] = useState(false);
 
+  // Favorite toggle needs to be declared before it's referenced in effects
+  const onToggleFavorite = React.useCallback(async () => {
+    if (!current) return;
+    const nowFav = await toggleFavorite(current);
+    setIsFav(nowFav);
+    setPlayerState({ isFav: nowFav });
+  }, [current]);
+
+  // Initialize controls with no-op functions
+  const controlsRef = useRef<PlayerControls>({
+    togglePlay: async () => {},
+    playNext: async () => {},
+    playPrev: async () => {},
+    toggleFavorite: async () => {},
+    seekTo: async () => {},
+    playAtIndex: async () => {},
+  });
+
+  // (deduplicated) controls effect defined later
+  // previously malformed effect removed
+
+  useEffect(() => {
+    // Publish current player state to subscribers (NowPlaying)
+    setPlayerState({ isPlaying, isFav, position, duration, track: current });
+  }, [isPlaying, isFav, position, duration, current]);
+
+  useEffect(() => {
+    // Publish queue and index whenever results or index change
+    setPlayerState({ queue: results, currentIndex: currentIndex ?? -1 });
+  }, [results, currentIndex]);
+
+  // Ensure the currently playing track remains in the queue even if results are refreshed from API
+  useEffect(() => {
+    if (!current) return;
+    const idx = results.findIndex((r) => r.trackId === current.trackId);
+    if (idx < 0) {
+      setResults((prev) => [current, ...prev]);
+      setCurrentIndex(0);
+      setPlayerState({ currentIndex: 0 });
+    }
+  }, [results, current?.trackId]);
   useEffect(() => {
     Audio.setAudioModeAsync({
       allowsRecordingIOS: false,
@@ -78,14 +121,14 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
       // Preload featured
       setLoading(true);
       jamendoFeatured(id, 25)
-        .then((items) => setResults(normalizeJamendoToITunesShape(items)))
+        .then((items) => setResults(normalizeJamendoToITunesShape(items).filter((t) => !!t.previewUrl)))
         .catch(() => {})
         .finally(() => setLoading(false));
     } else {
       // No Jamendo key: use Audius trending for full tracks
       setLoading(true);
       audiusTrending(25)
-        .then((items) => setResults(normalizeAudiusToITunesShape(items)))
+        .then((items) => setResults(normalizeAudiusToITunesShape(items).filter((t) => !!t.previewUrl)))
         .catch(() => {})
         .finally(() => setLoading(false));
     }
@@ -98,22 +141,78 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
     };
   }, []);
 
-  const onToggleFavorite = async () => {
-    if (!current) return;
-    const nowFav = await toggleFavorite(current);
-    setIsFav(nowFav);
-  };
+  // Main controls effect
+  useEffect(() => {
+    const newControls = {
+      togglePlay: async () => {
+        const s = soundRef.current;
+        if (!s) return;
+        const status = await s.getStatusAsync();
+        if (!status.isLoaded) return;
+        if (status.isPlaying) await s.pauseAsync();
+        else await s.playAsync();
+      },
+      playNext: async () => {
+        if (currentIndex == null || currentIndex < 0) return;
+        const list = await ensurePlayableQueue();
+        if (list.length === 0) return;
+        
+        let next = findPlayableFrom(list, currentIndex, 1);
+        if (next < 0) next = findPlayableFrom(list, list.length, 1);
+        if (next >= 0) playAtIndex(next);
+      },
+      playPrev: async () => {
+        if (currentIndex == null || currentIndex < 0) return;
+        const list = results;
+        if (list.length === 0) return;
+        
+        let prev = findPlayableFrom(list, currentIndex, -1);
+        if (prev < 0) prev = findPlayableFrom(list, -1, -1);
+        if (prev >= 0) playAtIndex(prev);
+      },
+      toggleFavorite: onToggleFavorite,
+      seekTo: async (millis: number) => {
+        try {
+          const s = soundRef.current;
+          if (!s) return;
+          const safe = Math.max(0, Math.min(duration || 0, Math.floor(millis)));
+          await s.setPositionAsync(safe);
+          setPosition(safe);
+          setPlayerState({ position: safe });
+        } catch {}
+      },
+      playAtIndex: (idx: number) => {
+        if (idx < 0 || idx >= results.length) return;
+        setCurrentIndex(idx);
+        setPlayerState({ currentIndex: idx });
+        loadAndPlay(results[idx]);
+      },
+    };
+    
+    controlsRef.current = newControls;
+    registerControls(newControls);
+    
+    if (__DEV__) {
+      (window as any).playerControls = newControls;
+    }
+    
+    return () => {
+      // Cleanup if needed
+    };
+  }, [results, currentIndex, duration, onToggleFavorite]);
 
   // Autoplay external track when provided
   useEffect(() => {
     if (autoplayTrack) {
       loadAndPlay(autoplayTrack);
-      // Ensure it appears in the list top
-      setResults((prev) => {
-        const exists = prev.find((p) => p.trackId === autoplayTrack.trackId);
-        if (exists) return prev;
-        return [autoplayTrack, ...prev];
-      });
+      // Ensure it appears in the list top if playable
+      if (autoplayTrack.previewUrl) {
+        setResults((prev) => {
+          const exists = prev.find((p) => p.trackId === autoplayTrack.trackId);
+          if (exists) return prev;
+          return [autoplayTrack, ...prev];
+        });
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoplayTrack?.trackId]);
@@ -124,10 +223,10 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
     try {
       if (clientId) {
         const j = await jamendoSearchTracks(clientId, query, 25);
-        setResults(normalizeJamendoToITunesShape(j));
+        setResults(normalizeJamendoToITunesShape(j).filter((t) => !!t.previewUrl));
       } else {
         const a = await audiusSearch(query, 25);
-        setResults(normalizeAudiusToITunesShape(a));
+        setResults(normalizeAudiusToITunesShape(a).filter((t) => !!t.previewUrl));
       }
     } catch (e: any) {
       setError(e?.message ?? 'Failed to search');
@@ -138,43 +237,68 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
 
   const loadAndPlay = async (track: ITunesTrack) => {
     try {
+      // Bump token; capture local token for this load
+      const token = ++loadSeqRef.current;
+      // Guard: if no playable URL, do not disrupt current playback
+      if (!track.previewUrl) {
+        return;
+      }
       if (soundRef.current) {
-        await soundRef.current.unloadAsync();
-        soundRef.current.setOnPlaybackStatusUpdate(null);
+        try {
+          await soundRef.current.unloadAsync();
+        } catch {}
+        try { soundRef.current.setOnPlaybackStatusUpdate(null); } catch {}
         soundRef.current = null;
       }
       setCurrent(track);
+      setPlayerState({ track });
       // Update favorite state for this track
       if (track.trackId) {
         isFavorite(track.trackId).then(setIsFav).catch(() => setIsFav(false));
       } else {
         setIsFav(false);
       }
-      setCurrentIndex((prev) => {
-        // find index in current results
-        const idx = results.findIndex((r) => r.trackId === track.trackId);
-        return idx >= 0 ? idx : prev;
-      });
+      // ensure track is part of results so next/prev always work
+      const idxExisting = results.findIndex((r) => r.trackId === track.trackId);
+      if (idxExisting < 0) {
+        // Use functional update to avoid stale 'results'
+        setResults((prev) => [track, ...prev]);
+        setCurrentIndex(0);
+        // Do not push queue immediately here to avoid stale data; the effect on [results,currentIndex] will publish
+      } else {
+        setCurrentIndex(idxExisting);
+        setPlayerState({ currentIndex: idxExisting });
+      }
       setIsPlaying(false);
       setPosition(0);
       setDuration(track.trackTimeMillis ?? 0);
-
-      if (!track.previewUrl) return;
 
       const { sound } = await Audio.Sound.createAsync(
         { uri: track.previewUrl },
         { shouldPlay: true },
         (status) => {
+          // Ignore updates from outdated loads
+          if (token !== loadSeqRef.current) return;
           if (!status.isLoaded) return;
           setPosition(status.positionMillis ?? 0);
           setDuration(status.durationMillis ?? track.trackTimeMillis ?? 0);
           setIsPlaying(status.isPlaying ?? false);
+          setPlayerState({
+            position: status.positionMillis ?? 0,
+            duration: status.durationMillis ?? track.trackTimeMillis ?? 0,
+            isPlaying: status.isPlaying ?? false,
+          });
           if ((status as any).didJustFinish) {
             playNext();
           }
         }
       );
 
+      // If another load started while we were creating this sound, discard this one
+      if (token !== loadSeqRef.current) {
+        try { await sound.unloadAsync(); } catch {}
+        return;
+      }
       soundRef.current = sound;
       saveRecentTrack(track).catch(() => {});
     } catch (e) {
@@ -182,50 +306,160 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
     }
   };
 
-  const togglePlay = async () => {
+  const togglePlay = React.useCallback(async () => {
     const s = soundRef.current;
     if (!s) return;
     const status = await s.getStatusAsync();
     if (!status.isLoaded) return;
     if (status.isPlaying) await s.pauseAsync();
     else await s.playAsync();
-  };
+  }, []);
 
   // Removed explicit stop control; play/pause in the mini-player handles UX.
 
-  const playAtIndex = (idx: number) => {
+  const playAtIndex = React.useCallback((idx: number) => {
     if (idx < 0 || idx >= results.length) return;
-    loadAndPlay(results[idx]);
+    // Update index first so any immediate consumers (e.g., subscribers) see it
     setCurrentIndex(idx);
+    setPlayerState({ currentIndex: idx });
+    loadAndPlay(results[idx]);
+  }, [results]);
+
+  const mergeUniquePlayable = (base: ITunesTrack[], add: ITunesTrack[]) => {
+    const seen = new Set(base.map(t => t.trackId));
+    return [
+      ...base,
+      ...add.filter(t => t.previewUrl && !seen.has(t.trackId) && seen.add(t.trackId))
+    ];
   };
 
-  const playNext = () => {
-    if (currentIndex == null) return;
-    const next = currentIndex + 1;
-    if (next < results.length) playAtIndex(next);
+  const loadMoreTracks = async (): Promise<ITunesTrack[]> => {
+    try {
+      if (clientId) {
+        const j = await jamendoFeatured(clientId, 25);
+        return normalizeJamendoToITunesShape(j).filter(t => t.previewUrl);
+      } else {
+        const a = await audiusTrending(25);
+        return normalizeAudiusToITunesShape(a).filter(t => t.previewUrl);
+      }
+    } catch {
+      return [];
+    }
   };
 
-  const playPrev = () => {
-    if (currentIndex == null) return;
-    const prev = currentIndex - 1;
-    if (prev >= 0) playAtIndex(prev);
+  const ensurePlayableQueue = async (): Promise<ITunesTrack[]> => {
+    // If we have at least 3 playable tracks, we're good
+    if (results.filter(t => t.previewUrl).length >= 3) return results;
+    
+    // Load more tracks and merge with existing ones
+    const newTracks = await loadMoreTracks();
+    const merged = mergeUniquePlayable(results, newTracks);
+    setResults(merged);
+    return merged;
   };
 
-  const seekTo = async (millis: number) => {
+  const findPlayableFrom = (list: ITunesTrack[], start: number, dir: 1 | -1) => {
+    if (!list.length) return -1;
+    
+    // Ensure start is within bounds
+    const safeStart = Math.max(-1, Math.min(start, list.length));
+    
+    // Search forward or backward based on direction
+    for (let i = 1; i <= list.length; i++) {
+      const idx = (safeStart + dir * i + list.length) % list.length;
+      const track = list[idx];
+      if (track?.previewUrl) return idx;
+    }
+    return -1;
+  };
+
+  const playNext = React.useCallback(async () => {
+    console.log('playNext called, currentIndex:', currentIndex);
+    if (currentIndex == null || currentIndex < 0) {
+      console.log('No current index, cannot play next');
+      return;
+    }
+    
+    try {
+      // Ensure we have enough playable tracks
+      const list = await ensurePlayableQueue();
+      console.log('Queue length after ensuring:', list.length);
+      
+      if (list.length === 0) {
+        console.log('No tracks in queue');
+        return;
+      }
+      
+      // Find next playable track
+      let next = findPlayableFrom(list, currentIndex, 1);
+      console.log('Next playable index:', next);
+      
+      // If no next playable, try from start
+      if (next < 0) {
+        console.log('No next track, trying from start');
+        next = findPlayableFrom(list, list.length, 1);
+      }
+      
+      if (next >= 0) {
+        console.log('Playing track at index:', next);
+        playAtIndex(next);
+      } else {
+        console.log('No playable next track found');
+      }
+    } catch (error) {
+      console.error('Error in playNext:', error);
+    }
+  }, [currentIndex, ensurePlayableQueue, findPlayableFrom, playAtIndex]);
+
+  const playPrev = React.useCallback(async () => {
+    console.log('playPrev called, currentIndex:', currentIndex);
+    if (currentIndex == null || currentIndex < 0) {
+      console.log('No current index, cannot play previous');
+      return;
+    }
+    
+    try {
+      const list = results;
+      console.log('Queue length:', list.length);
+      
+      if (list.length === 0) {
+        console.log('No tracks in queue');
+        return;
+      }
+      
+      // Find previous playable track
+      let prev = findPlayableFrom(list, currentIndex, -1);
+      console.log('Previous playable index:', prev);
+      
+      // If no previous playable, try from end
+      if (prev < 0) {
+        console.log('No previous track, trying from end');
+        prev = findPlayableFrom(list, list.length, -1);
+      }
+      
+      if (prev >= 0) {
+        console.log('Playing track at index:', prev);
+        playAtIndex(prev);
+      } else {
+        console.log('No playable previous track found');
+      }
+    } catch (error) {
+      console.error('Error in playPrev:', error);
+    }
+  }, [currentIndex, results, findPlayableFrom, playAtIndex]);
+
+  const seekTo = React.useCallback(async (millis: number) => {
     try {
       const s = soundRef.current;
       if (!s) return;
       const safe = Math.max(0, Math.min(duration || 0, Math.floor(millis)));
       await s.setPositionAsync(safe);
       setPosition(safe);
+      setPlayerState({ position: safe });
     } catch {}
-  };
+  }, [duration]);
 
-  const handleSeekAtX = (x: number) => {
-    if (!duration || barWidth <= 0) return;
-    const ratio = Math.max(0, Math.min(1, x / barWidth));
-    seekTo(ratio * duration);
-  };
+  // Seek gestures handled on NowPlaying screen; inline mini-player removed in favor of GlobalMiniPlayer
 
   const goNowPlaying = () => {
     if (!current) return;
@@ -321,119 +555,41 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
         {/* Results */}
         <FlatList
           data={results}
-          keyExtractor={(item) => String(item.trackId)}
+          keyExtractor={(item, index) => {
+            return item?.trackId?.toString() || 
+                   item?.previewUrl || 
+                   `${item?.trackName}-${item?.artistName}-${index}`;
+          }}
           renderItem={({ item }) => (
-            <TouchableOpacity
-              className="flex-row items-center p-3 gap-3 rounded-2xl mb-3"
-              onPress={() => loadAndPlay(item)}
-              activeOpacity={0.85}
-              style={{
-                backgroundColor: 'rgba(2,6,23,0.65)',
-                borderWidth: 1,
-                borderColor: 'rgba(34,211,238,0.18)',
-                shadowColor: '#22d3ee',
-                shadowOpacity: 0.25,
-                shadowRadius: 10,
-                marginHorizontal: 16,
-              }}
+            <TouchableOpacity 
+              className="flex-row items-center p-3 border-b border-gray-800"
+              onPress={() => playAtIndex(results.findIndex(t => t.trackId === item.trackId))}
             >
               {item.artworkUrl100 ? (
-                <Image source={{ uri: item.artworkUrl100 }} className="w-14 h-14 rounded-xl" />
+                <Image 
+                  source={{ uri: item.artworkUrl100 }} 
+                  className="w-14 h-14 rounded-xl mr-3"
+                  resizeMode="cover"
+                />
               ) : (
-                <View className="w-14 h-14 rounded-xl bg-black/30" />
+                <View className="w-14 h-14 rounded-xl bg-black/30 mr-3" />
               )}
               <View className="flex-1">
                 <Text className="font-semibold text-white" numberOfLines={1}>
                   {item.trackName}
                 </Text>
-                <Text className="text-cyan-200/80" numberOfLines={1}>
+                <Text className="text-cyan-200/80 text-sm" numberOfLines={1}>
                   {item.artistName}
                 </Text>
               </View>
-              <Text className="text-cyan-300/80">{msToMinSec(item.trackTimeMillis)}</Text>
+              <Text className="text-cyan-300/80 text-sm ml-2">
+                {msToMinSec(item.trackTimeMillis)}
+              </Text>
             </TouchableOpacity>
           )}
-          contentContainerStyle={{ paddingTop: 10, paddingBottom: insets.bottom + 170 }}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 120 }}
         />
-
-        {/* Mini Player */}
-        {current && (
-          <View className="absolute left-0 right-0" style={{ bottom: insets.bottom + 8, zIndex: 20, elevation: 8 }}>
-            <View
-              className="mx-4 mb-6 rounded-2xl p-4"
-              style={{
-                backgroundColor: 'rgba(2,6,23,0.8)',
-                borderWidth: 1,
-                borderColor: 'rgba(34,211,238,0.25)',
-                shadowColor: '#22d3ee',
-                shadowOpacity: 0.35,
-                shadowRadius: 18,
-                elevation: 8,
-              }}
-            >
-              <View className="flex-row items-center gap-3">
-                <TouchableOpacity onPress={goNowPlaying} activeOpacity={0.8} className="flex-row items-center gap-3 flex-1">
-                  {current.artworkUrl100 ? (
-                    <Image source={{ uri: current.artworkUrl100 }} className="w-12 h-12 rounded-xl" />
-                  ) : (
-                    <View className="w-12 h-12 rounded-xl bg-black/30" />
-                  )}
-                  <View className="flex-1">
-                    <Text className="font-semibold text-white" numberOfLines={1}>{current.trackName}</Text>
-                    <Text className="text-cyan-200/80" numberOfLines={1}>{current.artistName}</Text>
-                  </View>
-                </TouchableOpacity>
-                <Pressable
-                  onPress={onToggleFavorite}
-                  android_ripple={{ color: 'rgba(34,211,238,0.25)' }}
-                  style={{ width: 36, height: 36, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(148,163,184,0.14)', borderWidth: 1, borderColor: 'rgba(148,163,184,0.35)' }}
-                >
-                  <Image source={icons.star} style={{ width: 18, height: 18, tintColor: isFav ? '#22d3ee' : '#94a3b8' }} />
-                </Pressable>
-                <Pressable
-                  onPress={playPrev}
-                  android_ripple={{ color: 'rgba(34,211,238,0.25)' }}
-                  style={{ width: 36, height: 36, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', marginLeft: 8, backgroundColor: 'rgba(148,163,184,0.18)', borderWidth: 1, borderColor: 'rgba(148,163,184,0.35)', flexShrink: 0 }}
-                >
-                  <Image source={icons.prev} style={{ width: 16, height: 16, tintColor: '#e2e8f0' }} />
-                </Pressable>
-                <Pressable
-                  onPress={togglePlay}
-                  android_ripple={{ color: 'rgba(34,211,238,0.3)' }}
-                  style={{ width: 44, height: 44, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', backgroundColor: '#06b6d4', shadowColor: '#22d3ee', shadowOpacity: 0.6, shadowRadius: 14, flexShrink: 0 }}
-                >
-                  <Image source={isPlaying ? icons.pause : icons.play} style={{ width: 18, height: 18, tintColor: 'white' }} />
-                </Pressable>
-                <Pressable
-                  onPress={playNext}
-                  android_ripple={{ color: 'rgba(34,211,238,0.25)' }}
-                  style={{ width: 36, height: 36, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', marginLeft: 8, backgroundColor: 'rgba(148,163,184,0.18)', borderWidth: 1, borderColor: 'rgba(148,163,184,0.35)', flexShrink: 0 }}
-                >
-                  <Image source={icons.next} style={{ width: 16, height: 16, tintColor: '#e2e8f0' }} />
-                </Pressable>
-                {/* Stop button removed to avoid redundant control */}
-              </View>
-              <View className="mt-3">
-                <View
-                  className="h-2 rounded-full overflow-hidden"
-                  style={{ backgroundColor: 'rgba(148,163,184,0.25)' }}
-                  onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
-                  onStartShouldSetResponder={() => true}
-                  onMoveShouldSetResponder={() => true}
-                  onResponderGrant={(e) => handleSeekAtX(e.nativeEvent.locationX)}
-                  onResponderMove={(e) => handleSeekAtX(e.nativeEvent.locationX)}
-                  onResponderRelease={(e) => handleSeekAtX(e.nativeEvent.locationX)}
-                >
-                  <View style={{ width: `${progress * 100}%`, backgroundColor: '#22d3ee' }} className="h-full" />
-                </View>
-                <View className="flex-row justify-between mt-1">
-                  <Text className="text-cyan-200/80 text-xs">{msToMinSec(position)}</Text>
-                  <Text className="text-cyan-200/80 text-xs">{msToMinSec(duration)}</Text>
-                </View>
-              </View>
-            </View>
-          </View>
-        )}
+        
       </View>
     </ImageBackground>
   );
