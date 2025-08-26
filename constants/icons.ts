@@ -7,5 +7,8 @@ export const icons = {
   save: { uri: 'https://img.icons8.com/ios-filled/100/bookmark-ribbon.png' },
   star: { uri: 'https://img.icons8.com/ios-filled/100/star--v1.png' },
   play: { uri: 'https://img.icons8.com/ios-filled/100/play--v1.png' },
+  pause: { uri: 'https://img.icons8.com/ios-filled/100/pause--v1.png' },
+  next: { uri: 'https://img.icons8.com/ios-filled/100/end--v1.png' },
+  prev: { uri: 'https://img.icons8.com/ios-filled/100/skip-to-start.png' },
   arrow: { uri: 'https://img.icons8.com/ios-filled/100/chevron-right.png' },
 };

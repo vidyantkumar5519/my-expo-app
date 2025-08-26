@@ -4,12 +4,15 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Pressable,
   FlatList,
   Image,
   ImageBackground,
   ActivityIndicator,
 } from 'react-native';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
+import { useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { searchTracks, ITunesTrack } from '@/services/itunes';
 import { images } from '@/constants/images';
 import { icons } from '@/constants/icons';
@@ -24,6 +27,7 @@ import {
   audiusSearch,
   normalizeAudiusToITunesShape,
 } from '@/services/audius';
+import { saveRecentTrack, toggleFavorite, isFavorite } from '@/services/storage';
 
 function msToMinSec(ms?: number) {
   if (!ms && ms !== 0) return '--:--';
@@ -38,6 +42,8 @@ export type MusicPlayerProps = {
 };
 
 export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
+  const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ITunesTrack[]>([]);
   const [loading, setLoading] = useState(false);
@@ -49,13 +55,16 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState<number | null>(null);
+  const [barWidth, setBarWidth] = useState(0);
+  const [isFav, setIsFav] = useState(false);
 
   useEffect(() => {
     Audio.setAudioModeAsync({
       allowsRecordingIOS: false,
       interruptionModeIOS: InterruptionModeIOS.DuckOthers,
       playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
+      staysActiveInBackground: true,
       shouldDuckAndroid: true,
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
       playThroughEarpieceAndroid: false,
@@ -88,6 +97,12 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
       }
     };
   }, []);
+
+  const onToggleFavorite = async () => {
+    if (!current) return;
+    const nowFav = await toggleFavorite(current);
+    setIsFav(nowFav);
+  };
 
   // Autoplay external track when provided
   useEffect(() => {
@@ -129,6 +144,17 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
         soundRef.current = null;
       }
       setCurrent(track);
+      // Update favorite state for this track
+      if (track.trackId) {
+        isFavorite(track.trackId).then(setIsFav).catch(() => setIsFav(false));
+      } else {
+        setIsFav(false);
+      }
+      setCurrentIndex((prev) => {
+        // find index in current results
+        const idx = results.findIndex((r) => r.trackId === track.trackId);
+        return idx >= 0 ? idx : prev;
+      });
       setIsPlaying(false);
       setPosition(0);
       setDuration(track.trackTimeMillis ?? 0);
@@ -143,10 +169,14 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
           setPosition(status.positionMillis ?? 0);
           setDuration(status.durationMillis ?? track.trackTimeMillis ?? 0);
           setIsPlaying(status.isPlaying ?? false);
+          if ((status as any).didJustFinish) {
+            playNext();
+          }
         }
       );
 
       soundRef.current = sound;
+      saveRecentTrack(track).catch(() => {});
     } catch (e) {
       setError('Playback error');
     }
@@ -161,13 +191,45 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
     else await s.playAsync();
   };
 
-  const stop = async () => {
-    if (soundRef.current) {
-      try {
-        await soundRef.current.stopAsync();
-        await soundRef.current.setPositionAsync(0);
-      } catch {}
-    }
+  // Removed explicit stop control; play/pause in the mini-player handles UX.
+
+  const playAtIndex = (idx: number) => {
+    if (idx < 0 || idx >= results.length) return;
+    loadAndPlay(results[idx]);
+    setCurrentIndex(idx);
+  };
+
+  const playNext = () => {
+    if (currentIndex == null) return;
+    const next = currentIndex + 1;
+    if (next < results.length) playAtIndex(next);
+  };
+
+  const playPrev = () => {
+    if (currentIndex == null) return;
+    const prev = currentIndex - 1;
+    if (prev >= 0) playAtIndex(prev);
+  };
+
+  const seekTo = async (millis: number) => {
+    try {
+      const s = soundRef.current;
+      if (!s) return;
+      const safe = Math.max(0, Math.min(duration || 0, Math.floor(millis)));
+      await s.setPositionAsync(safe);
+      setPosition(safe);
+    } catch {}
+  };
+
+  const handleSeekAtX = (x: number) => {
+    if (!duration || barWidth <= 0) return;
+    const ratio = Math.max(0, Math.min(1, x / barWidth));
+    seekTo(ratio * duration);
+  };
+
+  const goNowPlaying = () => {
+    if (!current) return;
+    navigation.navigate('NowPlaying', { track: current, position, duration });
   };
 
   const renderItem = ({ item }: { item: ITunesTrack }) => (
@@ -291,12 +353,12 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
               <Text className="text-cyan-300/80">{msToMinSec(item.trackTimeMillis)}</Text>
             </TouchableOpacity>
           )}
-          contentContainerStyle={{ paddingTop: 10, paddingBottom: 160 }}
+          contentContainerStyle={{ paddingTop: 10, paddingBottom: insets.bottom + 170 }}
         />
 
         {/* Mini Player */}
         {current && (
-          <View className="absolute left-0 right-0 bottom-0">
+          <View className="absolute left-0 right-0" style={{ bottom: insets.bottom + 8, zIndex: 20, elevation: 8 }}>
             <View
               className="mx-4 mb-6 rounded-2xl p-4"
               style={{
@@ -306,35 +368,62 @@ export default function MusicPlayer({ autoplayTrack }: MusicPlayerProps) {
                 shadowColor: '#22d3ee',
                 shadowOpacity: 0.35,
                 shadowRadius: 18,
+                elevation: 8,
               }}
             >
               <View className="flex-row items-center gap-3">
-                {current.artworkUrl100 ? (
-                  <Image source={{ uri: current.artworkUrl100 }} className="w-12 h-12 rounded-xl" />
-                ) : (
-                  <View className="w-12 h-12 rounded-xl bg-black/30" />
-                )}
-                <View className="flex-1">
-                  <Text className="font-semibold text-white" numberOfLines={1}>{current.trackName}</Text>
-                  <Text className="text-cyan-200/80" numberOfLines={1}>{current.artistName}</Text>
-                </View>
-                <TouchableOpacity
-                  className="px-4 py-2 rounded-full"
-                  style={{ backgroundColor: '#06b6d4', shadowColor: '#22d3ee', shadowOpacity: 0.6, shadowRadius: 14 }}
+                <TouchableOpacity onPress={goNowPlaying} activeOpacity={0.8} className="flex-row items-center gap-3 flex-1">
+                  {current.artworkUrl100 ? (
+                    <Image source={{ uri: current.artworkUrl100 }} className="w-12 h-12 rounded-xl" />
+                  ) : (
+                    <View className="w-12 h-12 rounded-xl bg-black/30" />
+                  )}
+                  <View className="flex-1">
+                    <Text className="font-semibold text-white" numberOfLines={1}>{current.trackName}</Text>
+                    <Text className="text-cyan-200/80" numberOfLines={1}>{current.artistName}</Text>
+                  </View>
+                </TouchableOpacity>
+                <Pressable
+                  onPress={onToggleFavorite}
+                  android_ripple={{ color: 'rgba(34,211,238,0.25)' }}
+                  style={{ width: 36, height: 36, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(148,163,184,0.14)', borderWidth: 1, borderColor: 'rgba(148,163,184,0.35)' }}
+                >
+                  <Image source={icons.star} style={{ width: 18, height: 18, tintColor: isFav ? '#22d3ee' : '#94a3b8' }} />
+                </Pressable>
+                <Pressable
+                  onPress={playPrev}
+                  android_ripple={{ color: 'rgba(34,211,238,0.25)' }}
+                  style={{ width: 36, height: 36, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', marginLeft: 8, backgroundColor: 'rgba(148,163,184,0.18)', borderWidth: 1, borderColor: 'rgba(148,163,184,0.35)', flexShrink: 0 }}
+                >
+                  <Image source={icons.prev} style={{ width: 16, height: 16, tintColor: '#e2e8f0' }} />
+                </Pressable>
+                <Pressable
                   onPress={togglePlay}
+                  android_ripple={{ color: 'rgba(34,211,238,0.3)' }}
+                  style={{ width: 44, height: 44, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', backgroundColor: '#06b6d4', shadowColor: '#22d3ee', shadowOpacity: 0.6, shadowRadius: 14, flexShrink: 0 }}
                 >
-                  <Text className="text-white font-semibold">{isPlaying ? 'Pause' : 'Play'}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  className="px-3 py-2 rounded-full ml-2"
-                  style={{ backgroundColor: 'rgba(148,163,184,0.2)', borderWidth: 1, borderColor: 'rgba(148,163,184,0.35)' }}
-                  onPress={stop}
+                  <Image source={isPlaying ? icons.pause : icons.play} style={{ width: 18, height: 18, tintColor: 'white' }} />
+                </Pressable>
+                <Pressable
+                  onPress={playNext}
+                  android_ripple={{ color: 'rgba(34,211,238,0.25)' }}
+                  style={{ width: 36, height: 36, borderRadius: 9999, alignItems: 'center', justifyContent: 'center', marginLeft: 8, backgroundColor: 'rgba(148,163,184,0.18)', borderWidth: 1, borderColor: 'rgba(148,163,184,0.35)', flexShrink: 0 }}
                 >
-                  <Text className="text-slate-200">Stop</Text>
-                </TouchableOpacity>
+                  <Image source={icons.next} style={{ width: 16, height: 16, tintColor: '#e2e8f0' }} />
+                </Pressable>
+                {/* Stop button removed to avoid redundant control */}
               </View>
               <View className="mt-3">
-                <View className="h-2 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(148,163,184,0.25)' }}>
+                <View
+                  className="h-2 rounded-full overflow-hidden"
+                  style={{ backgroundColor: 'rgba(148,163,184,0.25)' }}
+                  onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+                  onStartShouldSetResponder={() => true}
+                  onMoveShouldSetResponder={() => true}
+                  onResponderGrant={(e) => handleSeekAtX(e.nativeEvent.locationX)}
+                  onResponderMove={(e) => handleSeekAtX(e.nativeEvent.locationX)}
+                  onResponderRelease={(e) => handleSeekAtX(e.nativeEvent.locationX)}
+                >
                   <View style={{ width: `${progress * 100}%`, backgroundColor: '#22d3ee' }} className="h-full" />
                 </View>
                 <View className="flex-row justify-between mt-1">
